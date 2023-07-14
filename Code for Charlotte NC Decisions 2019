@@ -5,7 +5,7 @@ import re
 from PyPDF2 import PdfReader
 
 # OpenAI API key
-openai.api_key = 'My openAI secret key'
+openai.api_key = 'Your openAI secret key'
 
 # Set the folder path containing the OCR'd PDF files
 folder_path = r"C:\Users\nghie\Downloads\Charlotte NC 2019 Decision Sample"
