@@ -1,0 +1,201 @@
+import os
+import openai
+import pandas as pd
+import re
+from PyPDF2 import PdfReader
+
+# OpenAI API key
+openai.api_key = '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'
+
+# Set the folder path containing the OCR'd PDF files
+folder_path = r"C:\Users\nghie\Downloads\Charlotte NC 2019 Decision Sample"
+
+# Generate text completions using OpenAI's text-davinci-003
+import json
+
+from nltk.tokenize import word_tokenize, sent_tokenize
+
+import openai
+from transformers import GPT2TokenizerFast
+tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+
+import tiktoken
+ENCODING = "gpt2"
+encoding = tiktoken.get_encoding(ENCODING)
+
+# Define tokens_used variable
+tokens_used = 0
+
+# Function to read text from a PDF file using PyPDF2
+def read_pdf(file_path):
+    pdf_reader = PdfReader(file_path)
+    text = ''.join(page.extract_text() for page in pdf_reader.pages)
+    return text
+
+def complete_text(prompt, temp=0, trys=0, clean=True):
+    global tokens_used
+
+    model = "text-davinci-003"
+    model_token_limit = 4097
+
+    token_count = len(encoding.encode(prompt))
+    max_tokens = model_token_limit - round(token_count + 5)
+
+    try:
+        response = openai.Completion.create(
+            model=model,
+            prompt=prompt,
+            temperature=temp,
+            max_tokens=max_tokens,
+            top_p=1.0,
+            frequency_penalty=0.0,
+            presence_penalty=0.0
+        )
+        output = {"output": str(response["choices"][0]["text"].strip())}
+    except:
+        print("Problem with API call!")
+        output = {"output": "error"}
+
+    tokens_used += token_count + len(encoding.encode(output["output"]))
+
+    if clean:
+        return clean_pseudo_json(output["output"], temp=0, trys=trys)
+    else:
+        return output
+
+def clean_pseudo_json(string, temp=0, key="output", trys=0, ask_for_help=1):
+    try:
+        output = json.loads(string)
+        if key in output:
+            return output[key]
+    except Exception as e:
+        prompt = f"I tried to parse some json and got this error: {e}. This was the would-be json.\n\n{string}\n\nReformat it to fix the error."
+        if trys <= 3:
+            if trys == 0:
+                warm_up = 0
+            else:
+                warm_up = 0.25
+            output = complete_text(prompt, temp=0 + warm_up, trys=trys + 1)
+            print("\n" + str(output) + "\n")
+        elif ask_for_help == 1:
+            print(prompt + "\nReforming FAILED!!!")
+            try:
+                os.system("say hey! I need some help. A little help please?")
+            except:
+                print("'say' not supported.\n\n")
+            output = input(
+                "Let's see if we can avoid being derailed. Examine the above output and construct your own output text. Then enter it below. If the output needs to be something other than a string, e.g., a list or json, start it with `EVAL: `. If you're typing that, be very sure there's no malicious code in the output.\n")
+            if output[:6] == "EVAL: ":
+                output = eval(output[6:])
+        else:
+            output = "There was an error getting a response!"
+
+    return output
+
+# Initialize lists to store dictionaries representing rows of data
+data = []
+
+# Set the temperature for LLM model. Here use temperature as 0 to avoid GPT making things up
+llm_temperature = 0
+use_LLM = True
+
+# Iterate over the files in the folder
+for file_name in os.listdir(folder_path):
+    if file_name.endswith('.pdf'):
+        file_path = os.path.join(folder_path, file_name)
+        
+        # Read the text from the PDF file
+        text = read_pdf(file_path)
+
+        # Extract the case number using regular expression
+        case_no = re.search(r"CASE NUMBER:\s*(\d+-\d+)", text)
+        case_no = case_no.group(1) if case_no else None
+
+        # Extract the required information from the text using OpenAI API
+        # Find the address using OpenAI API
+        prompt_text = f"Below you will be provided with the text of an order from a local zoning board of appeals.\n\n{text}\n\nPlease provide the address:"
+        response = openai.Completion.create(
+            engine='text-davinci-003',
+            prompt=prompt_text,
+            max_tokens=128,
+            temperature=llm_temperature,
+            n=1,
+            stop=None
+        )
+        address = response.choices[0].text.strip()
+
+        # Ward
+        ward = re.search("(?<=ward\s)(.*?)(?=to vary)", text, flags=re.IGNORECASE)
+        ward = ward.group(1).strip() if ward else None
+
+        # Here's where we use GPT to pull out some specific content.
+  
+        if use_LLM:
+    
+            # Description of Variance Requested
+            prompt_text = """Below you will be provided with the text of an order from a local zoning board of appeals responding to a variance request. You're looking to find the _description of variance requested_. That is, what the petitioner was asking for.        
+
+Here's the text of the order. 
+
+{}
+
+---
+
+Return a json object, including the outermost curly braces, where the key is "output" and the value is the _description of variance requested_. If you can't find a _description of variance requested_ in the text above, answer "none found". Be sure to use valid json, encasing keys and values in double quotes, and escaping internal quotes and special characters as needed.""".format(text)
+            
+            request = complete_text(prompt_text, temp=llm_temperature)
+
+            # Relevant Facts
+            prompt_text = """Below you will be provided with the text of an order from a local zoning board of appeals responding to a variance request. You're looking to find the _relevant facts_. That is, what facts did the board need to know to rule on the petitioner's request.
+
+Here's the text of the order. 
+
+{}
+
+---
+
+Return a json object, including the outermost curly braces, where the key is "output" and the value is a short summary of the _relevant facts_. If you can't find _relevant facts_ in the text above, answer "none found". Be sure to use valid json, encasing keys and values in double quotes, and escaping internal quotes and special characters as needed.""".format(text)
+
+            facts = complete_text(prompt_text, temp=llm_temperature)
+
+            # Reasoning & Decision
+            prompt_text = """Below you will be provided with the text of an order from a local zoning board of appeals responding to a variance request. You're looking to find the board's _decision_ and _reasoning_. That is, how the board ruled on the petitioner's request and how it came to that decision.        
+
+Here's the text of the order. 
+
+{}
+
+---
+
+Return a json object, including the outermost curly braces, where the key is "output" and the value is a json object with two key-value pairs: (1) the first item has the key "reasoning" and the value is a summary of the board's _reasoning_ as stated above; and (2) the second item has the key "decision" with a value that is a one or two-word restatement of the _decision_ found above (e.g., "granted," "not granted," or "granted in part"). If you can't find the _decision_ or _reasoning_ in the text above, both values should read "none found". Be sure to use valid json, encasing keys and values in double quotes, and escaping internal quotes and special characters as needed.""".format(text)
+
+            output = complete_text(prompt_text, temp=llm_temperature)
+            
+            reasoning = output["reasoning"] if "reasoning" in output else None
+
+            decision = output["decision"] if "decision" in output else None
+
+        # Create a dictionary representing the row of data
+        row = {
+            'FILE': file_name,
+            'CASE_NO': case_no,
+            'ADDRESS': address,
+            'WARD': ward,
+            'REQUEST': request,
+            'FACTS': facts,
+            'REASONING': reasoning,
+            'DECISION': decision
+        }
+
+        # Append the row dictionary to the data list
+        data.append(row)
+
+# Create a DataFrame from the extracted data
+df = pd.DataFrame(data)
+
+# If you are happy with the result, extract to an Excel file
+# Define the Excel file name and path
+excel_file_path = r"C:\Users\nghie\Downloads\Charlotte NC 2019 Decision sample result.xlsx"
+
+# Save DataFrame to Excel file
+df.to_excel(excel_file_path, index=False)
